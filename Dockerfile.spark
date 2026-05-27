@@ -1,0 +1,11 @@
+FROM bitnami/spark:3.4.1
+
+USER root
+# Cài đặt thư viện xử lý không gian H3
+RUN pip install h3
+
+# Tải sẵn thư viện Elasticsearch-Spark (để File 5 chạy không bị lỗi thiếu file JAR)
+RUN curl -O https://repo1.maven.org/maven2/org/elasticsearch/elasticsearch-spark-30_2.12/8.13.0/elasticsearch-spark-30_2.12-8.13.0.jar \
+    && mv elasticsearch-spark-30_2.12-8.13.0.jar /opt/bitnami/spark/jars/
+
+USER 1001
