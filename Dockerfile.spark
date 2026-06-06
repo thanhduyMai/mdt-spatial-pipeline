@@ -1,11 +1,44 @@
-FROM bitnami/spark:3.4.1
+FROM python:3.10-bullseye
 
 USER root
-# Cài đặt thư viện xử lý không gian H3
-RUN pip install h3
+# Cài đặt Java 11 (Bản ổn định tuyệt đối cho Spark)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-11-jre-headless curl procps \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Tải sẵn thư viện Elasticsearch-Spark (để File 5 chạy không bị lỗi thiếu file JAR)
-RUN curl -O https://repo1.maven.org/maven2/org/elasticsearch/elasticsearch-spark-30_2.12/8.13.0/elasticsearch-spark-30_2.12-8.13.0.jar \
-    && mv elasticsearch-spark-30_2.12-8.13.0.jar /opt/bitnami/spark/jars/
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+ENV SPARK_HOME=/usr/local/lib/python3.10/site-packages/pyspark
+ENV PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin
 
-USER 1001
+# Cài đặt PySpark và các thư viện hỗ trợ (geopandas cho không gian, psycopg2 cho db)
+RUN pip install --no-cache-dir \
+    pyspark==3.5.1 \
+    h3 \
+    delta-spark==3.2.0 \
+    great_expectations==0.15.50 \
+    geopandas \
+    psycopg2-binary \
+    SQLAlchemy
+
+# ==============================================================================
+# TẢI CÁC THƯ VIỆN JAR CẦN THIẾT CHO SPARK
+# (Vì PySpark 3.5.1 dùng Hadoop 3.3.4, ta phải tải thư viện AWS bản 3.3.4)
+# ==============================================================================
+
+# 1. Thư viện để Spark kết nối được với MinIO (S3)
+RUN curl -o $SPARK_HOME/jars/hadoop-aws-3.3.4.jar \
+    https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar \
+    && curl -o $SPARK_HOME/jars/aws-java-sdk-bundle-1.12.262.jar \
+    https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
+
+# 2. Thư viện để Spark ghi dữ liệu vào PostgreSQL / PostGIS (JDBC)
+RUN curl -o $SPARK_HOME/jars/postgresql-42.6.0.jar \
+    https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+
+RUN curl -o $SPARK_HOME/jars/delta-spark_2.12-3.2.0.jar \
+    https://repo1.maven.org/maven2/io/delta/delta-spark_2.12/3.2.0/delta-spark_2.12-3.2.0.jar \
+    && curl -o $SPARK_HOME/jars/delta-storage-3.2.0.jar \
+    https://repo1.maven.org/maven2/io/delta/delta-storage/3.2.0/delta-storage-3.2.0.jar    
+# (Tuỳ chọn) Nếu bạn làm việc với file pcap (Tshark) như trong profile, có thể 
+# bạn sẽ cần tải thêm các thư viện custom ở đây sau này.
