@@ -1,0 +1,4 @@
+cell_id,latitude,longitude,rsrp
+CELL_001,21.0285,105.8542,-80
+CELL_001,21.0286,105.8543,-85
+CELL_ERR,90.0,200.0,-150

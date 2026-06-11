@@ -9,10 +9,12 @@ x-airflow-common:
     - AIRFLOW__CORE__EXECUTOR=LocalExecutor
     - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
     - AIRFLOW__CORE__LOAD_EXAMPLES=False
+
+    - SPARK_SQL_EXTENSIONS=io.delta.sql.DeltaSparkSessionExtension
+    - SPARK_SQL_CATALOG_SPARK_CATALOG=org.apache.spark.sql.delta.catalog.DeltaCatalog
   volumes:
     - ./dags:/opt/airflow/dags
     - ./spark_scripts:/opt/spark_scripts
-    - ./datalake:/opt/datalake
   depends_on:
     postgres:
       condition: service_healthy
@@ -30,16 +32,17 @@ services:
       interval: 5s
       retries: 5
 
-  # 2. KHỞI TẠO AIRFLOW (Tạo tài khoản admin/admin)
+  # 2. KHỞI TẠO AIRFLOW (Tạo tài khoản admin/admin với email cá nhân)
   airflow-init:
     <<: *airflow-common
-    command: version
-    environment:
-      - _AIRFLOW_DB_UPGRADE=true
-      - _AIRFLOW_WWW_USER_CREATE=true
-      - _AIRFLOW_WWW_USER_USERNAME=admin
-      - _AIRFLOW_WWW_USER_PASSWORD=admin
-      - _AIRFLOW_WWW_USER_ROLE=Admin
+    command: >
+      bash -c "
+      airflow db migrate &&
+      (airflow users create --username admin --firstname Mai --lastname Duy --role Admin --email maithanhduy1705@gmail.com --password admin || true)
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # 3. AIRFLOW WEBSERVER (Giao diện Port 8080)
   airflow-webserver:
@@ -55,43 +58,97 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
-  # 5. SPARK MASTER (Giao diện Port 8081)
+  # 5. SPARK MASTER (Tự build)
   spark-master:
     build:
       context: .
       dockerfile: Dockerfile.spark
     environment:
-      - SPARK_MODE=master
+      # Kích hoạt Delta Lake Catalog cho Master
+      - SPARK_SQL_EXTENSIONS=io.delta.sql.DeltaSparkSessionExtension
+      - SPARK_SQL_CATALOG_SPARK_CATALOG=org.apache.spark.sql.delta.catalog.DeltaCatalog
+    command: spark-class org.apache.spark.deploy.master.Master -h 0.0.0.0
     ports:
       - "8081:8080"
       - "7077:7077"
     volumes:
       - ./spark_scripts:/opt/spark_scripts
-      - ./datalake:/opt/datalake
 
-  # 6. SPARK WORKER (Máy cày xử lý data)
-  spark-worker:
+  # 6. SPARK WORKER (Tự build)
+  # 6.1. SPARK WORKER SỐ 1
+  spark-worker-1:
     build:
       context: .
       dockerfile: Dockerfile.spark
+    container_name: mdt_spark_worker_1
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
+      - SPARK_SQL_EXTENSIONS=io.delta.sql.DeltaSparkSessionExtension
+      - SPARK_SQL_CATALOG_SPARK_CATALOG=org.apache.spark.sql.delta.catalog.DeltaCatalog
+    command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 -c 2 -m 2G
+    ports:
+      - "8082:8081" # Web UI của Worker 1
     volumes:
       - ./spark_scripts:/opt/spark_scripts
-      - ./datalake:/opt/datalake
     depends_on:
       - spark-master
 
-  # 7. ELASTICSEARCH (Tầng Serving Layer cho Dashboard)
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+  # 6.2. SPARK WORKER SỐ 2
+  spark-worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: mdt_spark_worker_2
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m # Ép RAM xuống 512MB để không sập máy ảo
+      - SPARK_SQL_EXTENSIONS=io.delta.sql.DeltaSparkSessionExtension
+      - SPARK_SQL_CATALOG_SPARK_CATALOG=org.apache.spark.sql.delta.catalog.DeltaCatalog
+    command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 -c 2 -m 2G
     ports:
-      - "9200:9200"
+      - "8083:8081" # Web UI của Worker 2
+    volumes:
+      - ./spark_scripts:/opt/spark_scripts
+    depends_on:
+      - spark-master
+
+  # 9. MINIO (Object Storage giả lập HDFS/S3 cho Data Lake)
+  minio:
+    image: minio/minio:latest
+    container_name: mdt_minio
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password123
+    ports:
+      - "9000:9000" # Port API cho Spark/Flink/Data Lake kết nối
+      - "9001:9001" # Port giao diện Web UI
+    # Chuyển sang chế độ phân tán trên 4 ổ đĩa giả lập từ data1 đến data4
+    command: server /data1 /data2 /data3 /data4 --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - minio_data1:/data1
+      - minio_data2:/data2
+      - minio_data3:/data3
+      - minio_data4:/data4
+
+  # 8. POSTGIS (Tầng Data Warehouse lưu dữ liệu không gian)
+  postgis-dw:
+    image: postgis/postgis:14-3.4 # Image đã tích hợp sẵn lõi bản đồ PostGIS
+    container_name: mdt_postgis
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=mdt_db # Tự động tạo sẵn database này khi bật lên
+    ports:
+      - "5432:5432" # Mở port này để DBeaver/pgAdmin chui vào được
+  
+volumes:
+  minio_data1:
+  minio_data2:
+  minio_data3:
+  minio_data4:
